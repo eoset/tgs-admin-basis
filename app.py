@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from io import BytesIO
 
 st.title("XLSX File Uploader and Viewer")
 
@@ -55,7 +56,20 @@ if df1 is not None and df2 is not None:
     try:
         personnr_list = df2["Beräkningsgrundare personnr"].tolist()
         matched_df = df1[df1["A"].isin(personnr_list)]
-        unmatched_df = df1[~df1["A"].isin(personnr_list)]
+        unmatched_df = df1[~df1["A"].isin(personnr_list)].copy()
+        if not unmatched_df.empty:
+            # Copy from the preceding unnamed column (index 1) into Differens
+            try:
+                # Get second column name (the placeholder pd.NA may appear as None or NaN)
+                second_col_name = unmatched_df.columns[1]
+                raw_series = unmatched_df[second_col_name].astype(str)
+                # Remove surrounding parentheses and internal parentheses while keeping minus signs
+                cleaned = raw_series.str.replace(r'[()]', '', regex=True).str.strip()
+                # Optionally convert comma decimal to dot
+                cleaned = cleaned.str.replace(',', '.', regex=False)
+                unmatched_df['Differens'] = cleaned
+            except Exception:
+                pass
 
         # st.subheader("Matched Rows from Underlag")
         # st.dataframe(matched_df)
@@ -65,11 +79,16 @@ if df1 is not None and df2 is not None:
         st.dataframe(unmatched_df)
 
         if not unmatched_df.empty:
+            # Prepare XLSX in-memory
+            xlsx_buffer = BytesIO()
+            with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
+                unmatched_df.to_excel(writer, index=False, sheet_name="Unmatched")
+            xlsx_buffer.seek(0)
             st.download_button(
-                label="Download Unmatched Rows as CSV",
-                data=unmatched_df.to_csv(index=False).encode('utf-8'),
-                file_name='unmatched_rows.csv',
-                mime='text/csv',
+                label="Download Unmatched Rows as XLSX",
+                data=xlsx_buffer,
+                file_name='unmatched_rows.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             )
 
     
@@ -78,12 +97,16 @@ if df1 is not None and df2 is not None:
             positive_matched_df = matched_df[pd.to_numeric(matched_df['Summa Ny-beräkning'], errors='coerce') > 0].copy()
 
             if not positive_matched_df.empty:
+                # Ensure Belopp is numeric based on Differens column if present
+                belopp_series = pd.to_numeric(positive_matched_df.get("Differens", pd.Series(dtype=str)), errors='coerce')
+                justeringstyp_series = belopp_series.apply(lambda v: "Manuell faktura" if pd.notna(v) and v < 0 else "Makulering")
                 new_df = pd.DataFrame({
-                    "Justeringstyp": "Makulering",
+                    "Justeringstyp": justeringstyp_series,
                     "Justeringsår": justeringsar,
                     "Justeringsmånad": "",
                     "Personnummer": positive_matched_df["A"],
-                    "Belopp": positive_matched_df["Summa Ny-beräkning"]
+                    "Belopp": belopp_series,
+                    "Beskrivning": "Kommer från Extens"
                 })
 
                 st.subheader("Justeringsunderlag")
@@ -91,7 +114,7 @@ if df1 is not None and df2 is not None:
 
                 st.download_button(
                     label="Download Justeringsunderlag as CSV",
-                    data=new_df.to_csv(index=False).encode('utf-8'),
+                    data=new_df.to_csv(index=False, sep=';').encode('ISO‑8859‑1'),
                     file_name='justeringsunderlag.csv',
                     mime='text/csv',
                 )
